@@ -2,6 +2,30 @@
 #include "I2C.h"
 #include "DigitalOutput.h"
 
+typedef enum
+{
+	I2C_STATE_WRITE_START,
+	I2C_STATE_WRITE_ADDR,
+	I2C_STATE_WRITE_REG,
+	I2C_STATE_WRITE_DATA,
+	I2C_STATE_READ_START,
+	I2C_STATE_READ_ADDR,
+	I2C_STATE_READ_REG,
+	I2C_STATE_READ_REP_START,
+	I2C_STATE_READ_ADDR2,
+	I2C_STATE_READ_DATA,
+}
+i2c_state_t;
+
+volatile uint8_t slave_address;
+volatile uint8_t memory_address;
+volatile i2c_state_t state = I2C_STATE_READ_START;
+volatile uint32_t num_bytes_received = 0;
+volatile uint32_t num_bytes_written = 0;
+volatile uint32_t num_bytes_total = 0;
+volatile uint8_t* data_buffer = 0;
+volatile bool transaction_ongoing = false;
+
 I2CMaster::I2CMaster(I2C_TypeDef* periph, GPIO_TypeDef* port_scl, uint32_t pin_scl, GPIO_TypeDef* port_sda, uint32_t pin_sda)
 {
 	// I2C1 or I2C2
@@ -86,115 +110,159 @@ I2CMaster::I2CMaster(I2C_TypeDef* periph, GPIO_TypeDef* port_scl, uint32_t pin_s
 /* Write data at val of length len at memory address mem_addr in slave with address slave_addr */
 void I2CMaster::tx_data(uint8_t slave_addr, uint8_t mem_addr, uint8_t* val, uint32_t len)
 {
+	transaction_ongoing = true;
+	
+	slave_address = slave_addr;
+	memory_address = mem_addr;
+	num_bytes_written = 0;
+	num_bytes_total = len;
+	data_buffer = val;
+	
 	// Wait until the I2C peripheral is enabled
 	while(!(m_periph->CR1 & I2C_CR1_PE))
 	{
 		m_periph->CR1 |= I2C_CR1_PE;
 	}
 	
+	state = I2C_STATE_WRITE_START;
+	
 	// Send start flag
 	m_periph->CR1 |= I2C_CR1_START;
-	// Wait for SB flag to go high
- 	while (!(m_periph->SR1 & I2C_SR1_SB))
-	{
-		int i = m_periph->SR2 & I2C_SR2_MSL;
-	}
 	
-	// Write slave address (shifted left with LSB = 0) into the data register
-	m_periph->DR = (slave_addr << 1);
-	// After this sequence of operations, the master will clock out the slave address
+	// All transactions done in interrupts. Data will be clocked out from the memory address passed in.
 	
-	// Wait until byte transfer is complete
-	while (!(m_periph->SR1 & I2C_SR1_ADDR));
-	// Read SR2
-	uint8_t tra = (m_periph->SR2 & I2C_SR2_TRA) >> I2C_SR2_TRA;
-	// After this sequence of operations, the master will clear the ADDR bit
-	
-	m_periph->DR = mem_addr;
-	
-	// Wait until memory address has transferred
-	while (!(m_periph->SR1 & I2C_SR1_BTF));
-	
-	uint8_t* pData = val;
-	
-	for (uint32_t byte_num = 0; byte_num < len; byte_num++)
-	{
-		m_periph->DR = *(pData++);
-		// Wait until data byte has transferred
-		while (!(m_periph->SR1 & I2C_SR1_BTF));
-	}
-	
-	// Send stop flag
-	m_periph->CR1 |= I2C_CR1_STOP;
+	while (transaction_ongoing);
 }
 	
 /* Read len bytes into val from memory address mem_addr in slave with address slave_addr */
 void I2CMaster::rx_data(uint8_t slave_addr, uint8_t mem_addr, uint8_t* val, uint32_t len)
 {
+	transaction_ongoing = true;
+	
+	slave_address = slave_addr;
+	memory_address = mem_addr;
+	num_bytes_received = 0;
+	num_bytes_total = len;
+	data_buffer = val;
+	
 	// Wait until the I2C peripheral is enabled
 	while(!(m_periph->CR1 & I2C_CR1_PE))
 	{
 		m_periph->CR1 |= I2C_CR1_PE;
 	}
 	
+	state = I2C_STATE_READ_START;
+	
 	// Send start flag
 	m_periph->CR1 |= I2C_CR1_START;
-	// Wait for SB flag to go high	
- 	while (!(m_periph->SR1 & I2C_SR1_SB));
-	uint32_t temp = m_periph->SR2 & I2C_SR2_MSL;
 	
-	// Write slave address (shifted left with LSB = 0) into the data register
-	m_periph->DR = (slave_addr << 1);
-	// After this sequence of operations, the master will clock out the slave address
+	// All transactions done in interrupts. Received data will appear at the memory address passed in.
 	
-	// Wait until byte transfer is complete
-	while (!(m_periph->SR1 & I2C_SR1_ADDR));
-	// Read SR2
-	uint8_t tra = (m_periph->SR2 & I2C_SR2_TRA) >> I2C_SR2_TRA;
-	// After this sequence of operations, the master will clear the ADDR bit
-	
-	m_periph->DR = mem_addr;
-	
-	// Wait until memory address has transferred
-	while (!(m_periph->SR1 & I2C_SR1_BTF));
-	
-	// Send repeated start flag
-	m_periph->CR1 |= I2C_CR1_START;
-	
-	// Wait for SB flag to go high
- 	while (!(m_periph->SR1 & I2C_SR1_SB))
-	{
-		int i = m_periph->SR2 & I2C_SR2_MSL;
-	}
-	
-	// Write slave address (shifted left with LSB = 1) into the data register
-	m_periph->DR = (slave_addr << 1) | 0x01;
-	// After this sequence of operations, the master will clock out the slave address
-	
-	// Wait until byte transfer is complete
-	while (!(m_periph->SR1 & I2C_SR1_ADDR));
-	// Read SR2
-	tra = (m_periph->SR2 & I2C_SR2_TRA) >> I2C_SR2_TRA;
-	// After this sequence of operations, the master will clear the ADDR bit
-	
-	for (uint32_t byte_num = 0; byte_num < len; byte_num++)
-	{
-		// Wait for RXNE (i.e. for a byte to appear in the data register)
-		while(!(m_periph->SR1 & I2C_SR1_RXNE));
-		if (byte_num == len - 1)
-		{
-			// Send stop flag
-			m_periph->CR1 |= I2C_CR1_STOP;
-		}
-		// Read the data register
-		*(val++) = m_periph->DR & 0xFF;
-	}
+	while (transaction_ongoing);
 }
 
 
 void I2C1_EV_IRQHandler()
 {
-	int i = 0;
+	if (I2C1->SR1 & I2C_SR1_SB)
+	{
+		// Start bit sent
+		
+		// Clear the flag by reading SR2
+		uint32_t temp = I2C1->SR2 & I2C_SR2_MSL;
+		
+		if (state == I2C_STATE_READ_START)
+		{
+			// Write slave address (shifted left with LSB = 0) into the data register
+			I2C1->DR = (slave_address << 1);
+			// After this sequence of operations, the master will clock out the slave address
+			state = I2C_STATE_READ_ADDR;
+		}
+		else if (state == I2C_STATE_READ_REP_START)
+		{
+			// Write slave address (shifted left with LSB = 1) into the data register
+			I2C1->DR = (slave_address << 1) | 0x01;
+			// After this sequence of operations, the master will clock out the slave address
+			state = I2C_STATE_READ_ADDR2;
+		}
+		else if (state == I2C_STATE_WRITE_START)
+		{
+			// Write slave address (shifted left with LSB = 0) into the data register
+			I2C1->DR = (slave_address << 1);
+			// After this sequence of operations, the master will clock out the slave address
+			state = I2C_STATE_WRITE_ADDR;
+		}
+	}
+	if (I2C1->SR1 & I2C_SR1_ADDR)
+	{
+		// Slave address sent
+		
+		// Clear the flag by reading SR2
+		uint8_t tra = (I2C1->SR2 & I2C_SR2_TRA) >> I2C_SR2_TRA;
+		// After this sequence of operations, the master will clear the ADDR bit
+		
+		if (state == I2C_STATE_READ_ADDR)
+		{
+			I2C1->DR = memory_address;
+			state = I2C_STATE_READ_REG;
+		}
+		else if (state == I2C_STATE_READ_ADDR2)
+		{
+			state = I2C_STATE_READ_DATA;
+			if (num_bytes_total == 1)
+			{
+				// Send stop flag
+				I2C1->CR1 |= I2C_CR1_STOP;
+			}
+		}
+		else if (state == I2C_STATE_WRITE_ADDR)
+		{
+			I2C1->DR = memory_address;
+			state = I2C_STATE_WRITE_REG;
+		}
+	}
+	if (I2C1->SR1 & I2C_SR1_TXE)
+	{
+		// Transmit buffer empty
+		
+		if (state == I2C_STATE_READ_REG)
+		{
+			// Send repeated start flag
+			I2C1->CR1 |= I2C_CR1_START;
+			state = I2C_STATE_READ_REP_START;
+		}
+		else if (state == I2C_STATE_WRITE_REG)
+		{
+			I2C1->DR = *(data_buffer++);
+			if (++num_bytes_written >= num_bytes_total)
+			{
+				// Send stop flag
+				I2C1->CR1 |= I2C_CR1_STOP;
+				transaction_ongoing = false;
+			}
+		}
+	}
+	if (I2C1->SR1 & I2C_SR1_RXNE)
+	{
+		// Receive buffer not empty
+		
+		if (state == I2C_STATE_READ_DATA)
+		{
+			if (++num_bytes_received == num_bytes_total && num_bytes_received > 1)
+			{
+				// Send stop flag
+				I2C1->CR1 |= I2C_CR1_STOP;
+			}
+			
+			// Read the data register
+			*(data_buffer++) = I2C1->DR & 0xFF;
+			
+			if (num_bytes_received == num_bytes_total)
+			{
+				transaction_ongoing = false;
+			}
+		}
+	}
 }
 
 
